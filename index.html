@@ -110,14 +110,24 @@ function cleanTitle(t) {
 
 async function lookup(code) {
   if (cache[code]) return cache[code];
-  try {
-    const r = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(code));
-    if (r.status === 429) { say('Daily lookup limit reached. Type the title yourself.'); return null; }
-    const d = await r.json();
-    const raw = d.items && d.items[0] && d.items[0].title;
-    if (raw) return { title: cleanTitle(raw), fmt: guessFormat(raw) };
-  } catch (e) { say('Couldn’t reach the lookup service. Type the title yourself.'); return null; }
-  say('Barcode not found. Type the title once and it will be remembered.');
+  const api = 'https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(code);
+  const routes = [
+    api,
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(api),
+    'https://corsproxy.io/?url=' + encodeURIComponent(api)
+  ];
+  for (const u of routes) {
+    try {
+      const r = await fetch(u);
+      if (r.status === 429) { say('Daily lookup limit reached. Type the title yourself.'); return null; }
+      const d = await r.json();
+      if (d.code === 'EXCEED_LIMIT') { say('Daily lookup limit reached. Type the title yourself.'); return null; }
+      const raw = d.items && d.items[0] && d.items[0].title;
+      if (raw) return { title: cleanTitle(raw), fmt: guessFormat(raw) };
+      if (Array.isArray(d.items)) { say('Barcode not found. Type the title once and it will be remembered.'); return null; }
+    } catch (e) { /* try the next route */ }
+  }
+  say('Couldn’t reach the lookup service. Type the title yourself.');
   return null;
 }
 
