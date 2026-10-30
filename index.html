@@ -31,6 +31,7 @@ input[type=text],input[type=search]{font:inherit;width:100%;padding:12px;border:
 .fmts button{background:#f4f6f8;border:2px solid transparent;color:var(--ink)}
 .fmts button small{display:block;font-weight:400;color:var(--muted)}
 .fmts button[aria-pressed=true]{background:#fff;border-color:var(--ink)}
+.links{display:flex;gap:16px;margin-top:8px;font-size:14px}.links a{color:var(--bd)}
 .row{display:flex;gap:8px}
 .row .primary{font-size:16px;padding:12px}
 .row .ghost{flex:0 0 auto}
@@ -63,6 +64,7 @@ li .x{background:transparent;color:var(--muted);padding:8px 10px;font-size:20px;
     <div class="code" id="pCode"></div>
     <label for="pTitle"><b>Title</b></label>
     <input type="text" id="pTitle" placeholder="Type the title">
+    <div class="links" id="links"></div>
     <div class="fmts" id="fmts"></div>
     <div class="row"><button class="primary" id="saveBtn">Add to shelf</button><button class="ghost" id="cancelBtn">Cancel</button></div>
   </section>
@@ -82,6 +84,7 @@ const FMT = {
   dvd: { name: 'DVD',     res: '576p'  },
   uhd: { name: '4K UHD',  res: '2160p' }
 };
+const LOOKUP_PROXY = 'https://disc-lookup.zebraef91.workers.dev'; // address of your own relay (see instructions)
 const $ = id => document.getElementById(id);
 function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
 let items = load('discs', []);
@@ -103,19 +106,20 @@ function guessFormat(t) {
   return null;
 }
 function cleanTitle(t) {
-  return t.replace(/[\[\(][^\]\)]*(blu-?\s?ray|dvd|4k|uhd|region|digital|ultra hd)[^\]\)]*[\]\)]/gi, '')
-          .replace(/\s*[-–:]?\s*(blu-?\s?ray|dvd)\s*$/i, '')
-          .replace(/\s{2,}/g, ' ').trim();
+  const tail = x => x.replace(/[\s\-–:|]+$/, '');
+  t = t.replace(/[\[\(][^\]\)]*(blu-?\s?ray|dvd|4k|uhd|region|digital|ultra hd)[^\]\)]*[\]\)]/gi, '');
+  t = tail(t).replace(/\s*[-–:]?\s*(blu-?\s?ray|dvd)\s*$/i, '');
+  return tail(t).replace(/\s{2,}/g, ' ').trim();
 }
 
 async function lookup(code) {
   if (cache[code]) return cache[code];
   const api = 'https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(code);
-  const routes = [
+  const routes = (LOOKUP_PROXY ? [LOOKUP_PROXY + '?upc=' + encodeURIComponent(code)] : []).concat([
     api,
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(api),
     'https://corsproxy.io/?url=' + encodeURIComponent(api)
-  ];
+  ]);
   for (const u of routes) {
     try {
       const r = await fetch(u);
@@ -141,6 +145,7 @@ async function handle(code) {
   const dupe = items.find(i => i.code === code);
   if (dupe) say('Already on your shelf: ' + dupe.title + '. You can add another copy.');
   $('pCode').textContent = 'Barcode ' + code;
+  $('links').innerHTML = '<a target="_blank" rel="noopener" href="https://hmv.com/search?searchtext=' + code + '">Search on HMV</a><a target="_blank" rel="noopener" href="https://www.google.com/search?q=' + code + '+blu-ray">Search on Google</a>';
   $('pTitle').value = hit ? hit.title : '';
   drawFormats();
   $('panel').style.display = 'block';
