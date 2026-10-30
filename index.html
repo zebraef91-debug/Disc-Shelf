@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14202e">
+<title>Disc Shelf</title>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#14202e;--paper:#eef1f4;--card:#fff;--line:#d3dae2;--muted:#5d6b7a;--bd:#0a63e0;--dvd:#b4540a;--uhd:#14202e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 Archivo,system-ui,sans-serif}
+header{background:var(--ink);color:#fff;padding:20px 16px 18px}
+header h1{margin:0;font-size:28px;font-weight:800;letter-spacing:-.5px}
+header p{margin:2px 0 0;color:#aab7c6;font-size:14px}
+main{max-width:640px;margin:0 auto;padding:16px}
+button{font:inherit;cursor:pointer;border:0;border-radius:8px;padding:12px 16px;font-weight:600}
+button:focus-visible,input:focus-visible{outline:3px solid #7fb0ff;outline-offset:2px}
+.primary{background:var(--bd);color:#fff;width:100%;font-size:18px;padding:16px}
+.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+input[type=text],input[type=search]{font:inherit;width:100%;padding:12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+#scanwrap{display:none;margin:12px 0}
+#reader{width:100%;border-radius:8px;overflow:hidden;background:#000}
+#scanwrap .ghost{margin-top:8px;width:100%}
+.manual{display:flex;gap:8px;margin:12px 0}
+.manual input{flex:1}
+#msg{min-height:22px;color:var(--muted);font-size:14px;margin:4px 0 8px}
+#panel{display:none;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin:12px 0}
+#panel .code{color:var(--muted);font-size:13px;margin-bottom:8px}
+.fmts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+.fmts button{background:#f4f6f8;border:2px solid transparent;color:var(--ink)}
+.fmts button small{display:block;font-weight:400;color:var(--muted)}
+.fmts button[aria-pressed=true]{background:#fff;border-color:var(--ink)}
+.row{display:flex;gap:8px}
+.row .primary{font-size:16px;padding:12px}
+.row .ghost{flex:0 0 auto}
+.bar{display:flex;gap:8px;align-items:center;margin:20px 0 8px}
+.bar input{flex:1}
+.count{color:var(--muted);font-size:14px;margin-bottom:8px}
+ul{list-style:none;padding:0;margin:0}
+li{display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--line);border-left-width:6px;border-radius:8px;padding:10px 12px;margin-bottom:8px}
+li.bd{border-left-color:var(--bd)}li.dvd{border-left-color:var(--dvd)}li.uhd{border-left-color:var(--uhd)}
+li .t{flex:1;min-width:0}
+li .t b{display:block;overflow-wrap:anywhere}
+li .t span{font-size:13px;color:var(--muted)}
+li .x{background:transparent;color:var(--muted);padding:8px 10px;font-size:20px;line-height:1}
+.empty{color:var(--muted);text-align:center;padding:28px 8px}
+@media (prefers-reduced-motion:no-preference){#panel{animation:in .18s ease-out}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
+</style>
+</head>
+<body>
+<header><h1>Disc Shelf</h1><p>Scan a barcode to add a DVD, Blu-ray or 4K disc.</p></header>
+<main>
+  <button class="primary" id="scanBtn">Scan a disc</button>
+  <div id="scanwrap"><div id="reader"></div><button class="ghost" id="stopBtn">Stop camera</button></div>
+  <div class="manual">
+    <input type="text" id="manualCode" inputmode="numeric" placeholder="Or type the barcode number" aria-label="Barcode number">
+    <button class="ghost" id="manualBtn">Look up</button>
+  </div>
+  <div id="msg" role="status"></div>
+
+  <section id="panel" aria-live="polite">
+    <div class="code" id="pCode"></div>
+    <label for="pTitle"><b>Title</b></label>
+    <input type="text" id="pTitle" placeholder="Type the title">
+    <div class="fmts" id="fmts"></div>
+    <div class="row"><button class="primary" id="saveBtn">Add to shelf</button><button class="ghost" id="cancelBtn">Cancel</button></div>
+  </section>
+
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search your shelf" aria-label="Search your shelf">
+    <button class="ghost" id="csvBtn">Export CSV</button>
+  </div>
+  <div class="count" id="count"></div>
+  <ul id="list"></ul>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script>
+const FMT = {
+  bd:  { name: 'Blu-ray', res: '1080p' },
+  dvd: { name: 'DVD',     res: '576p'  },
+  uhd: { name: '4K UHD',  res: '2160p' }
+};
+const $ = id => document.getElementById(id);
+function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+let items = load('discs', []);
+let cache = load('titles', {});
+let cur = null, scanner = null, busy = false, keepScanning = false;
+
+function persist() {
+  try {
+    localStorage.setItem('discs', JSON.stringify(items));
+    localStorage.setItem('titles', JSON.stringify(cache));
+  } catch (e) { say('Couldn’t save to this browser. Export a CSV to keep your list.'); }
+}
+function say(t) { $('msg').textContent = t || ''; }
+
+function guessFormat(t) {
+  if (/4k|uhd|ultra\s*hd/i.test(t)) return 'uhd';
+  if (/blu-?\s?ray/i.test(t)) return 'bd';
+  if (/\bdvd\b/i.test(t)) return 'dvd';
+  return null;
+}
+function cleanTitle(t) {
+  return t.replace(/[\[\(][^\]\)]*(blu-?\s?ray|dvd|4k|uhd|region|digital|ultra hd)[^\]\)]*[\]\)]/gi, '')
+          .replace(/\s*[-–:]?\s*(blu-?\s?ray|dvd)\s*$/i, '')
+          .replace(/\s{2,}/g, ' ').trim();
+}
+
+async function lookup(code) {
+  if (cache[code]) return cache[code];
+  try {
+    const r = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + encodeURIComponent(code));
+    if (r.status === 429) { say('Daily lookup limit reached. Type the title yourself.'); return null; }
+    const d = await r.json();
+    const raw = d.items && d.items[0] && d.items[0].title;
+    if (raw) return { title: cleanTitle(raw), fmt: guessFormat(raw) };
+  } catch (e) { say('Couldn’t reach the lookup service. Type the title yourself.'); return null; }
+  say('Barcode not found. Type the title once and it will be remembered.');
+  return null;
+}
+
+async function handle(code) {
+  code = code.replace(/\D/g, '');
+  if (!code) { say('That doesn’t look like a barcode number.'); return; }
+  say('Looking up ' + code + '…');
+  const hit = await lookup(code);
+  if (hit) say('');
+  cur = { code, fmt: hit ? hit.fmt : null };
+  const dupe = items.find(i => i.code === code);
+  if (dupe) say('Already on your shelf: ' + dupe.title + '. You can add another copy.');
+  $('pCode').textContent = 'Barcode ' + code;
+  $('pTitle').value = hit ? hit.title : '';
+  drawFormats();
+  $('panel').style.display = 'block';
+  $('pTitle').focus();
+}
+
+function drawFormats() {
+  $('fmts').innerHTML = '';
+  Object.keys(FMT).forEach(k => {
+    const b = document.createElement('button');
+    b.setAttribute('aria-pressed', cur.fmt === k);
+    b.innerHTML = FMT[k].name + '<small>' + FMT[k].res + '</small>';
+    b.onclick = () => { cur.fmt = k; drawFormats(); };
+    $('fmts').appendChild(b);
+  });
+}
+
+$('saveBtn').onclick = () => {
+  const title = $('pTitle').value.trim();
+  if (!title) { say('Add a title first.'); return; }
+  if (!cur.fmt) { say('Pick DVD, Blu-ray or 4K UHD.'); return; }
+  items.unshift({ code: cur.code, title, fmt: cur.fmt, added: new Date().toISOString().slice(0, 10) });
+  cache[cur.code] = { title, fmt: cur.fmt };
+  persist(); closePanel(); say('Added: ' + title); render();
+  if (keepScanning) startScan();
+};
+$('cancelBtn').onclick = () => { closePanel(); say(''); };
+function closePanel() { $('panel').style.display = 'none'; cur = null; }
+
+async function startScan() {
+  if (typeof Html5Qrcode === 'undefined') { say('Scanner failed to load. Check your connection.'); return; }
+  keepScanning = true;
+  $('scanwrap').style.display = 'block';
+  const F = Html5QrcodeSupportedFormats;
+  scanner = new Html5Qrcode('reader', { formatsToSupport: [F.EAN_13, F.UPC_A, F.EAN_8, F.UPC_E], verbose: false });
+  try {
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 280, height: 140 } }, onCode, () => {});
+    say('Point the camera at the barcode.');
+  } catch (e) {
+    keepScanning = false;
+    $('scanwrap').style.display = 'none';
+    say('Couldn’t open the camera. Allow camera access and make sure the page is on https.');
+  }
+}
+async function stopScan() {
+  if (scanner) { try { await scanner.stop(); scanner.clear(); } catch (e) {} scanner = null; }
+  $('scanwrap').style.display = 'none';
+}
+async function onCode(code) {
+  if (busy) return;
+  busy = true;
+  if (navigator.vibrate) navigator.vibrate(60);
+  await stopScan();
+  await handle(code);
+  busy = false;
+}
+$('scanBtn').onclick = () => { closePanel(); startScan(); };
+$('stopBtn').onclick = () => { keepScanning = false; stopScan(); say(''); };
+$('manualBtn').onclick = () => { closePanel(); handle($('manualCode').value); $('manualCode').value = ''; };
+$('manualCode').onkeydown = e => { if (e.key === 'Enter') $('manualBtn').click(); };
+
+function render() {
+  const q = $('q').value.trim().toLowerCase();
+  const shown = items.filter(i => !q || i.title.toLowerCase().includes(q) || i.code.includes(q));
+  $('count').textContent = items.length + (items.length === 1 ? ' disc' : ' discs') +
+    (q ? ' · ' + shown.length + ' match' : '');
+  const ul = $('list');
+  ul.innerHTML = '';
+  if (!shown.length) {
+    ul.innerHTML = '<div class="empty">' + (items.length ? 'Nothing matches that search.' : 'Your shelf is empty. Scan your first disc.') + '</div>';
+    return;
+  }
+  shown.forEach(i => {
+    const li = document.createElement('li');
+    li.className = i.fmt;
+    const t = document.createElement('div'); t.className = 't';
+    const b = document.createElement('b'); b.textContent = i.title;
+    const s = document.createElement('span'); s.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res;
+    t.append(b, s);
+    const x = document.createElement('button'); x.className = 'x'; x.textContent = '×';
+    x.setAttribute('aria-label', 'Remove ' + i.title);
+    x.onclick = () => { if (confirm('Remove “' + i.title + '”?')) { items.splice(items.indexOf(i), 1); persist(); render(); } };
+    li.append(t, x);
+    ul.appendChild(li);
+  });
+}
+$('q').oninput = render;
+
+$('csvBtn').onclick = () => {
+  if (!items.length) { say('Nothing to export yet.'); return; }
+  const esc = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const rows = [['Title', 'Format', 'Resolution', 'Barcode', 'Added']]
+    .concat(items.map(i => [i.title, FMT[i.fmt].name, FMT[i.fmt].res, i.code, i.added]));
+  const blob = new Blob([rows.map(r => r.map(esc).join(',')).join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'disc-shelf.csv'; a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+render();
+</script>
+</body>
+</html>
