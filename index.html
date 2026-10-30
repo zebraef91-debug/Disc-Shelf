@@ -35,8 +35,9 @@ input[type=text],input[type=search]{font:inherit;width:100%;padding:12px;border:
 .row{display:flex;gap:8px}
 .row .primary{font-size:16px;padding:12px}
 .row .ghost{flex:0 0 auto}
-.bar{display:flex;gap:8px;align-items:center;margin:20px 0 8px}
-.bar input{flex:1}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:20px 0 8px}
+.bar input{flex:1 1 100%}
+.bar button{flex:1}
 .count{color:var(--muted);font-size:14px;margin-bottom:8px}
 ul{list-style:none;padding:0;margin:0}
 li{display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--line);border-left-width:6px;border-radius:8px;padding:10px 12px;margin-bottom:8px}
@@ -45,6 +46,12 @@ li .t{flex:1;min-width:0}
 li .t b{display:block;overflow-wrap:anywhere}
 li .t span{font-size:13px;color:var(--muted)}
 li .x{background:transparent;color:var(--muted);padding:8px 10px;font-size:20px;line-height:1}
+li.grp{display:block;padding:0;border-left-color:var(--ink)}
+.ghead{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;background:transparent;text-align:left;padding:12px;border-radius:8px;color:var(--ink);font-weight:800}
+.ghead span{font-size:13px;color:var(--muted);font-weight:400;text-align:right}
+.subs{list-style:none;padding:0 8px 8px;margin:0}
+.subs li{margin:0 0 6px;background:#f7f9fb}
+.paste{margin-top:8px;width:100%}
 .empty{color:var(--muted);text-align:center;padding:28px 8px}
 @media (prefers-reduced-motion:no-preference){#panel{animation:in .18s ease-out}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
 </style>
@@ -65,6 +72,7 @@ li .x{background:transparent;color:var(--muted);padding:8px 10px;font-size:20px;
     <label for="pTitle"><b>Title</b></label>
     <input type="text" id="pTitle" placeholder="Type the title">
     <div class="links" id="links"></div>
+    <button class="ghost paste" id="pasteBtn" type="button">Paste title from clipboard</button>
     <div class="fmts" id="fmts"></div>
     <div class="row"><button class="primary" id="saveBtn">Add to shelf</button><button class="ghost" id="cancelBtn">Cancel</button></div>
   </section>
@@ -72,6 +80,8 @@ li .x{background:transparent;color:var(--muted);padding:8px 10px;font-size:20px;
   <div class="bar">
     <input type="search" id="q" placeholder="Search your shelf" aria-label="Search your shelf">
     <button class="ghost" id="csvBtn">Export CSV</button>
+    <button class="ghost" id="importBtn">Import CSV</button>
+    <input type="file" id="importFile" accept=".csv,text/csv" hidden>
   </div>
   <div class="count" id="count"></div>
   <ul id="list"></ul>
@@ -207,9 +217,113 @@ $('stopBtn').onclick = () => { keepScanning = false; stopScan(); say(''); };
 $('manualBtn').onclick = () => { closePanel(); handle($('manualCode').value); $('manualCode').value = ''; };
 $('manualCode').onkeydown = e => { if (e.key === 'Enter') $('manualBtn').click(); };
 
+const ORD = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11, twelfth: 12, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const NUM = '(\\d{1,2}|' + Object.keys(ORD).join('|') + ')';
+const SEP = '[\\s:,\\-–|]*';
+const toN = w => ORD[String(w).toLowerCase()] || parseInt(w, 10);
+const SEASON_PATS = [
+  { re: new RegExp('^(.+?)' + SEP + '(?:the\\s+)?(?:complete\\s+)?seasons?\\s*' + NUM + '\\s*(?:-|–|to|&|and)\\s*(\\d{1,2})\\b', 'i'), kind: 'range' },
+  { re: new RegExp('^(.+?)' + SEP + '(?:the\\s+)?(?:complete\\s+)?(?:season|series)\\s*' + NUM + '\\b', 'i'), kind: 'one' },
+  { re: new RegExp('^(.+?)' + SEP + '(?:the\\s+)?(?:complete\\s+)?' + NUM + '(?:st|nd|rd|th)?\\s+(?:season|series)\\b', 'i'), kind: 'one' },
+  { re: /^(.+?)[\s:,\-–|]+S(\d{1,2})\b/i, kind: 'one' },
+  { re: /^(.+?)[\s:,\-–|]*(?:the\s+)?complete\s+series\b/i, kind: 'all' }
+];
+function seasonInfo(t) {
+  for (const p of SEASON_PATS) {
+    const m = t.match(p.re);
+    if (!m) continue;
+    const show = m[1].replace(/[\s:,\-–|]+$/, '').trim();
+    if (!show) continue;
+    if (p.kind === 'all') return { show, label: 'Complete series', n: 0 };
+    const n = toN(m[2]);
+    if (p.kind === 'range') return { show, label: 'Seasons ' + n + '–' + m[3], n };
+    return { show, label: 'Season ' + n, n };
+  }
+  return null;
+}
+let franchises = new Map();
+function infoFor(i) {
+  if (i.show === '') return null;
+  const s = seasonInfo(i.title);
+  if (i.show) return { show: i.show, label: s ? s.label : i.title, n: s ? s.n : 999 };
+  if (s) return s;
+  const f = franchises.get(i);
+  return f ? { show: f, label: i.title, n: 999 } : null;
+}
+const STOP_FIRST = new Set(['black','white','red','blue','green','dark','last','first','little','big','new','old','dead','dirty','good','bad','night','day','man','love','war','mr','mrs','dr','one','two','three','house','blood','lost','final','my','his','her','our','your','i','we','you','it','they','all','no','not','death','life','king','queen','sky','blue']);
+const ARTICLES = new Set(['the', 'a', 'an']);
+const TRAIL = new Set(['episode', 'part', 'chapter', 'vol', 'volume', 'the', 'a', 'an', 'of', 'and', '&', 'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'collection', 'trilogy', 'saga', 'complete']);
+function words(t) { return t.split(/\s+/).map(w => w.replace(/^[^\w&]+|[^\w&]+$/g, '')).filter(Boolean); }
+function franchiseMap(list) {
+  const map = new Map(), cands = [];
+  list.forEach(i => {
+    if (i.show !== undefined || seasonInfo(i.title)) return;
+    const w = words(i.title);
+    if (!w.length) return;
+    let s = 0;
+    while (s < w.length - 1 && ARTICLES.has(w[s].toLowerCase())) s++;
+    cands.push({ i, w, s, lw: w.slice(s).map(x => x.toLowerCase()), t: i.title.toLowerCase().trim() });
+  });
+  const distinct = arr => new Set(arr.map(c => c.t)).size;
+  const common = arr => {
+    let p = arr[0].lw.slice();
+    arr.forEach(c => { let k = 0; while (k < p.length && k < c.lw.length && p[k] === c.lw[k]) k++; p = p.slice(0, k); });
+    return p;
+  };
+  const trim = (p, min) => { p = p.slice(); while (p.length > min && TRAIL.has(p[p.length - 1])) p.pop(); return p; };
+  const assign = (arr, min) => {
+    const p = trim(common(arr), min);
+    if (p.length < min) return;
+    const c0 = arr[0];
+    const name = c0.w.slice(0, c0.s + p.length).join(' ');
+    arr.forEach(c => map.set(c.i, name));
+  };
+  const byKey = (arr, fn) => {
+    const m = new Map();
+    arr.forEach(c => { const k = fn(c); if (k) { if (!m.has(k)) m.set(k, []); m.get(k).push(c); } });
+    return m;
+  };
+  const two = c => c.lw.length > 1 ? c.lw[0] + ' ' + c.lw[1] : null;
+  byKey(cands, c => c.lw[0]).forEach((arr, first) => {
+    if (STOP_FIRST.has(first)) {
+      byKey(arr, two).forEach(sub => { if (distinct(sub) >= 2) assign(sub, 2); });
+      return;
+    }
+    if (distinct(arr) < 2) return;
+    if (common(arr).length >= 2) { assign(arr, 1); return; }
+    const subs = [...byKey(arr, two).values()].filter(sub => distinct(sub) >= 2);
+    if (subs.length) subs.forEach(sub => assign(sub, 2)); else assign(arr, 1);
+  });
+  return map;
+}
+function editShow(i) {
+  const cur = infoFor(i);
+  const v = prompt('Which show is this part of? Leave blank to list it on its own.', cur ? cur.show : '');
+  if (v === null) return;
+  i.show = v.trim();
+  persist(); render();
+}
+function rowEl(i, text, nested) {
+  const li = document.createElement('li');
+  li.className = i.fmt;
+  const t = document.createElement('div'); t.className = 't';
+  const b = document.createElement('b'); b.textContent = text;
+  const s = document.createElement('span'); s.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res;
+  t.append(b, s);
+  const e = document.createElement('button'); e.className = 'x'; e.textContent = '✎';
+  e.setAttribute('aria-label', 'Change the show name for ' + i.title);
+  e.onclick = () => editShow(i);
+  const x = document.createElement('button'); x.className = 'x'; x.textContent = '×';
+  x.setAttribute('aria-label', 'Remove ' + i.title);
+  x.onclick = () => { if (confirm('Remove “' + i.title + '”?')) { items.splice(items.indexOf(i), 1); persist(); render(); } };
+  li.append(t, e, x);
+  return li;
+}
+const openGroups = new Set();
 function render() {
+  franchises = franchiseMap(items);
   const q = $('q').value.trim().toLowerCase();
-  const shown = items.filter(i => !q || i.title.toLowerCase().includes(q) || i.code.includes(q));
+  const shown = items.filter(i => !q || i.title.toLowerCase().includes(q) || i.code.includes(q) || (i.show || '').toLowerCase().includes(q));
   $('count').textContent = items.length + (items.length === 1 ? ' disc' : ' discs') +
     (q ? ' · ' + shown.length + ' match' : '');
   const ul = $('list');
@@ -218,17 +332,39 @@ function render() {
     ul.innerHTML = '<div class="empty">' + (items.length ? 'Nothing matches that search.' : 'Your shelf is empty. Scan your first disc.') + '</div>';
     return;
   }
+  const groups = new Map(), order = [];
   shown.forEach(i => {
-    const li = document.createElement('li');
-    li.className = i.fmt;
-    const t = document.createElement('div'); t.className = 't';
-    const b = document.createElement('b'); b.textContent = i.title;
-    const s = document.createElement('span'); s.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res;
-    t.append(b, s);
-    const x = document.createElement('button'); x.className = 'x'; x.textContent = '×';
-    x.setAttribute('aria-label', 'Remove ' + i.title);
-    x.onclick = () => { if (confirm('Remove “' + i.title + '”?')) { items.splice(items.indexOf(i), 1); persist(); render(); } };
-    li.append(t, x);
+    const info = infoFor(i);
+    if (!info) { order.push({ single: i }); return; }
+    const k = info.show.toLowerCase();
+    if (!groups.has(k)) { const g = { key: k, name: info.show, list: [] }; groups.set(k, g); order.push(g); }
+    groups.get(k).list.push({ i, info });
+  });
+  order.forEach(g => {
+    if (g.single) { ul.appendChild(rowEl(g.single, g.single.title)); return; }
+    if (g.list.length < 2) { ul.appendChild(rowEl(g.list[0].i, g.list[0].i.title)); return; }
+    g.list.sort((a, b) => a.info.n - b.info.n || a.i.title.localeCompare(b.i.title, undefined, { numeric: true }) || a.i.fmt.localeCompare(b.i.fmt));
+    const isOpen = !!q || openGroups.has(g.key);
+    const li = document.createElement('li'); li.className = 'grp';
+    const h = document.createElement('button'); h.className = 'ghead';
+    h.setAttribute('aria-expanded', isOpen);
+    const seasons = new Set(g.list.filter(x => x.info.n < 999).map(x => x.info.n)).size;
+    const films = new Set(g.list.filter(x => x.info.n === 999).map(x => x.i.title.toLowerCase())).size;
+    const parts = [];
+    if (seasons) parts.push(seasons + (seasons === 1 ? ' season' : ' seasons'));
+    if (films) parts.push(films + (films === 1 ? ' film' : ' films'));
+    parts.push(g.list.length + (g.list.length === 1 ? ' disc' : ' discs'));
+    const name = document.createElement('div'); name.textContent = g.name;
+    const meta = document.createElement('span');
+    meta.textContent = parts.join(' · ') + (isOpen ? ' ▲' : ' ▼');
+    h.append(name, meta);
+    h.onclick = () => { openGroups.has(g.key) ? openGroups.delete(g.key) : openGroups.add(g.key); render(); };
+    li.appendChild(h);
+    if (isOpen) {
+      const sub = document.createElement('ul'); sub.className = 'subs';
+      g.list.forEach(x => sub.appendChild(rowEl(x.i, x.info.label, true)));
+      li.appendChild(sub);
+    }
     ul.appendChild(li);
   });
 }
@@ -237,12 +373,69 @@ $('q').oninput = render;
 $('csvBtn').onclick = () => {
   if (!items.length) { say('Nothing to export yet.'); return; }
   const esc = v => '"' + String(v).replace(/"/g, '""') + '"';
-  const rows = [['Title', 'Format', 'Resolution', 'Barcode', 'Added']]
-    .concat(items.map(i => [i.title, FMT[i.fmt].name, FMT[i.fmt].res, i.code, i.added]));
+  const rows = [['Title', 'Format', 'Resolution', 'Barcode', 'Added', 'Show']]
+    .concat(items.map(i => [i.title, FMT[i.fmt].name, FMT[i.fmt].res, i.code, i.added, i.show === undefined ? '' : (i.show === '' ? '-' : i.show)]));
   const blob = new Blob([rows.map(r => r.map(esc).join(',')).join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'disc-shelf.csv'; a.click();
   URL.revokeObjectURL(a.href);
+};
+
+function parseCSV(text) {
+  const rows = []; let row = [], f = '', q = false;
+  text = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
+      else f += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); f = ''; rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ''));
+}
+$('importBtn').onclick = () => $('importFile').click();
+$('importFile').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const rows = parseCSV(await file.text());
+  const head = (rows.shift() || []).map(h => h.trim().toLowerCase());
+  const iT = head.indexOf('title'), iF = head.indexOf('format'), iC = head.indexOf('barcode'), iA = head.indexOf('added'), iS = head.indexOf('show');
+  if (iT < 0 || iF < 0) { say('That doesn’t look like a Disc Shelf CSV.'); return; }
+  const byName = {};
+  Object.keys(FMT).forEach(k => byName[FMT[k].name.toLowerCase()] = k);
+  let added = 0, skipped = 0;
+  rows.forEach(r => {
+    const title = (r[iT] || '').trim();
+    const fmt = byName[(r[iF] || '').trim().toLowerCase()];
+    const code = iC >= 0 ? (r[iC] || '').replace(/\D/g, '') : '';
+    const date = iA >= 0 ? (r[iA] || '').trim() : '';
+    if (!title || !fmt) { skipped++; return; }
+    if (items.some(i => i.code === code && i.title === title && i.fmt === fmt && i.added === date)) { skipped++; return; }
+    const rawShow = iS >= 0 ? (r[iS] || '').trim() : '';
+    const item = { code, title, fmt, added: date };
+    if (rawShow === '-') item.show = ''; else if (rawShow) item.show = rawShow;
+    items.push(item);
+    if (code) cache[code] = { title, fmt };
+    added++;
+  });
+  items.sort((a, b) => (b.added || '').localeCompare(a.added || ''));
+  persist(); render();
+  say('Imported ' + added + (added === 1 ? ' disc' : ' discs') + (skipped ? ' (' + skipped + ' skipped as duplicates or unreadable)' : '') + '.');
+};
+
+$('pasteBtn').onclick = async () => {
+  try {
+    const t = (await navigator.clipboard.readText()).trim();
+    if (!t) { say('Nothing copied yet. Copy the title on the other tab first.'); return; }
+    $('pTitle').value = cleanTitle(t);
+    if (cur && !cur.fmt) { cur.fmt = guessFormat(t); drawFormats(); }
+    say('');
+  } catch (e) { say('Couldn’t read the clipboard. Long-press the title box and choose Paste.'); }
 };
 
 render();
