@@ -52,6 +52,25 @@ li.grp{display:block;padding:0;border-left-color:var(--ink)}
 .subs{list-style:none;padding:0 8px 8px;margin:0}
 .subs li{margin:0 0 6px;background:#f7f9fb}
 .paste{margin-top:8px;width:100%}
+[hidden]{display:none!important}
+main{padding-bottom:84px}
+.gline{display:flex;align-items:center}
+.gline .ghead{flex:1}
+li.selrow label{display:flex;gap:12px;align-items:center;flex:1;min-width:0;cursor:pointer}
+li.selrow input{width:22px;height:22px;flex:none}
+#selbar{position:fixed;left:0;right:0;bottom:0;background:var(--ink);color:#fff;padding:12px 16px;display:flex;gap:8px;align-items:center;z-index:5}
+#selbar span{flex:1}
+#selbar .primary{width:auto;font-size:16px;padding:10px 14px}
+#selbar .ghost{color:#fff;border-color:#5d6b7a}
+.dlg{position:fixed;inset:0;background:rgba(20,32,46,.55);display:flex;align-items:flex-end;justify-content:center;z-index:10}
+.dlgBox{background:#fff;width:100%;max-width:640px;border-radius:12px 12px 0 0;padding:16px;max-height:85vh;overflow:auto}
+.dlgBox h2{margin:0 0 4px;font-size:20px}
+.dlgSub{margin:0 0 8px;color:var(--muted);font-size:14px}
+.dlgList{display:flex;flex-direction:column;gap:6px;margin:8px 0 12px}
+.dlgList button{text-align:left;background:#f4f6f8;border:2px solid transparent;color:var(--ink)}
+.dlgList button[aria-pressed=true]{background:#fff;border-color:var(--ink)}
+.dlgHint{min-height:22px;margin:8px 0;font-size:14px}
+.dlgHint button{margin:6px 8px 0 0}
 .empty{color:var(--muted);text-align:center;padding:28px 8px}
 @media (prefers-reduced-motion:no-preference){#panel{animation:in .18s ease-out}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
 </style>
@@ -81,12 +100,29 @@ li.grp{display:block;padding:0;border-left-color:var(--ink)}
     <input type="search" id="q" placeholder="Search your shelf" aria-label="Search your shelf">
     <button class="ghost" id="csvBtn">Export CSV</button>
     <button class="ghost" id="importBtn">Import CSV</button>
+    <button class="ghost" id="selBtn">Select</button>
     <input type="file" id="importFile" accept=".csv,text/csv" hidden>
   </div>
   <div class="count" id="count"></div>
   <ul id="list"></ul>
 </main>
 
+<div id="selbar" hidden>
+  <span id="selCount">0 selected</span>
+  <button class="primary" id="selGroup">Group selected</button>
+  <button class="ghost" id="selCancel">Cancel</button>
+</div>
+<div class="dlg" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" hidden>
+  <div class="dlgBox">
+    <h2 id="dlgTitle"></h2>
+    <p class="dlgSub" id="dlgSub"></p>
+    <div class="dlgList" id="dlgList"></div>
+    <label for="dlgNew"><b>Or make a new group</b></label>
+    <input type="text" id="dlgNew" placeholder="Group name" autocomplete="off">
+    <div class="dlgHint" id="dlgHint" role="status"></div>
+    <div class="row"><button class="primary" id="dlgOk">Save</button><button class="ghost" id="dlgCancel">Cancel</button></div>
+  </div>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <script>
 const FMT = {
@@ -257,7 +293,7 @@ function words(t) { return t.split(/\s+/).map(w => w.replace(/^[^\w&]+|[^\w&]+$/
 function franchiseMap(list) {
   const map = new Map(), cands = [];
   list.forEach(i => {
-    if (i.show !== undefined || seasonInfo(i.title)) return;
+    if (i.show === '' || seasonInfo(i.title)) return;
     const w = words(i.title);
     if (!w.length) return;
     let s = 0;
@@ -276,7 +312,7 @@ function franchiseMap(list) {
     if (p.length < min) return;
     const c0 = arr[0];
     const name = c0.w.slice(0, c0.s + p.length).join(' ');
-    arr.forEach(c => map.set(c.i, name));
+    arr.forEach(c => { if (c.i.show === undefined) map.set(c.i, name); });
   };
   const byKey = (arr, fn) => {
     const m = new Map();
@@ -296,12 +332,115 @@ function franchiseMap(list) {
   });
   return map;
 }
+function normKey(n) {
+  return String(n).toLowerCase().replace(/&/g, ' and ').replace(/['’]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/^(the|a|an) /, '').replace(/\s/g, '');
+}
+function dist(a, b) {
+  const m = a.length, n = b.length, d = [];
+  for (let i = 0; i <= m; i++) d[i] = [i];
+  for (let j = 1; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
+    const c = a[i - 1] === b[j - 1] ? 0 : 1;
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c);
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+  }
+  return d[m][n];
+}
+function groupStats() {
+  const m = new Map();
+  items.forEach(i => {
+    const f = infoFor(i);
+    if (!f) return;
+    const k = normKey(f.show);
+    if (!k) return;
+    const e = m.get(k) || { name: f.show, count: 0 };
+    e.count++; m.set(k, e);
+  });
+  return m;
+}
+function closest(key, stats, skip) {
+  const lim = key.length <= 5 ? 1 : 2;
+  let best = null, bd = 99;
+  stats.forEach((e, k) => { if (k === skip) return; const d = dist(key, k); if (d <= lim && d < bd) { bd = d; best = e.name; } });
+  return best;
+}
+let dlg = null, selectMode = false;
+const selected = new Set();
+function hint(t) { $('dlgHint').textContent = t || ''; }
+function openDialog(o) {
+  const stats = groupStats();
+  dlg = { o, stats, choice: null, keep: false };
+  const cur = o.current ? normKey(o.current) : null;
+  if (o.mode !== 'group') {
+    if (cur && stats.has(cur)) dlg.choice = { t: 'existing', k: cur };
+    else if (o.targets.length === 1) dlg.choice = { t: 'alone' };
+  }
+  $('dlgTitle').textContent = o.title;
+  $('dlgSub').textContent = o.sub || '';
+  $('dlgNew').value = '';
+  hint('');
+  drawChoices();
+  $('dlg').hidden = false;
+}
+function drawChoices() {
+  const box = $('dlgList'), c = dlg.choice;
+  box.innerHTML = '';
+  const add = (label, on, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label; b.setAttribute('aria-pressed', !!on); b.onclick = fn;
+    box.appendChild(b);
+  };
+  const pick = ch => () => { dlg.choice = ch; dlg.keep = false; $('dlgNew').value = ''; hint(''); drawChoices(); };
+  if (dlg.o.mode !== 'group') add('On its own (no group)', c && c.t === 'alone', pick({ t: 'alone' }));
+  [...dlg.stats.entries()].filter(([k]) => k !== dlg.o.ownKey)
+    .sort((a, b) => a[1].name.localeCompare(b[1].name))
+    .forEach(([k, e]) => add(e.name + ' (' + e.count + ')', c && c.t === 'existing' && c.k === k, pick({ t: 'existing', k })));
+}
+function closeDlg() { $('dlg').hidden = true; dlg = null; }
+function didYouMean(near, typed) {
+  const h = $('dlgHint');
+  h.textContent = 'Did you mean “' + near + '”? ';
+  const a = document.createElement('button'); a.type = 'button'; a.className = 'ghost'; a.textContent = 'Use “' + near + '”';
+  a.onclick = () => { $('dlgNew').value = near; dlgSave(); };
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'ghost'; b.textContent = 'Keep “' + typed + '”';
+  b.onclick = () => { dlg.keep = true; dlgSave(); };
+  h.append(a, b);
+}
+function dlgSave() {
+  if (!dlg) return;
+  const o = dlg.o, typed = $('dlgNew').value.trim();
+  let value;
+  if (typed) {
+    const key = normKey(typed);
+    if (!key) { hint('Use letters or numbers in the name.'); return; }
+    if (o.ownKey && key === o.ownKey) value = typed;
+    else if (dlg.stats.has(key)) value = dlg.stats.get(key).name;
+    else {
+      const near = dlg.keep ? null : closest(key, dlg.stats, o.ownKey);
+      if (near) { didYouMean(near, typed); return; }
+      value = typed;
+    }
+  } else if (dlg.choice) {
+    value = dlg.choice.t === 'alone' ? '' : dlg.stats.get(dlg.choice.k).name;
+  } else { hint('Pick a group or type a new name.'); return; }
+  o.targets.forEach(i => { i.show = value; });
+  persist(); closeDlg();
+  if (selectMode) setSelect(false); else render();
+}
 function editShow(i) {
-  const cur = infoFor(i);
-  const v = prompt('Which show is this part of? Leave blank to list it on its own.', cur ? cur.show : '');
-  if (v === null) return;
-  i.show = v.trim();
-  persist(); render();
+  const f = infoFor(i);
+  openDialog({ title: 'Which group is “' + i.title + '” in?', targets: [i], current: f ? f.show : null });
+}
+function groupEdit(g) {
+  openDialog({ title: 'Rename or merge “' + g.name + '”', sub: 'Pick another group to merge into, or type a new name to rename this one.', targets: g.list.map(x => x.i), ownKey: g.key, mode: 'group' });
+}
+function updateSel() { $('selCount').textContent = selected.size + ' selected'; }
+function setSelect(on) {
+  selectMode = on; selected.clear();
+  $('selbar').hidden = !on; $('selBtn').textContent = on ? 'Done' : 'Select';
+  updateSel(); render();
 }
 function rowEl(i, text, nested) {
   const li = document.createElement('li');
@@ -332,11 +471,25 @@ function render() {
     ul.innerHTML = '<div class="empty">' + (items.length ? 'Nothing matches that search.' : 'Your shelf is empty. Scan your first disc.') + '</div>';
     return;
   }
+  if (selectMode) {
+    shown.forEach(i => {
+      const li = document.createElement('li'); li.className = i.fmt + ' selrow';
+      const lab = document.createElement('label');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = selected.has(i);
+      cb.onchange = () => { cb.checked ? selected.add(i) : selected.delete(i); updateSel(); };
+      const t = document.createElement('div'); t.className = 't';
+      const b = document.createElement('b'); b.textContent = i.title;
+      const f = infoFor(i);
+      const sp = document.createElement('span'); sp.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res + (f ? ' · in ' + f.show : '');
+      t.append(b, sp); lab.append(cb, t); li.appendChild(lab); ul.appendChild(li);
+    });
+    return;
+  }
   const groups = new Map(), order = [];
   shown.forEach(i => {
     const info = infoFor(i);
     if (!info) { order.push({ single: i }); return; }
-    const k = info.show.toLowerCase();
+    const k = normKey(info.show);
     if (!groups.has(k)) { const g = { key: k, name: info.show, list: [] }; groups.set(k, g); order.push(g); }
     groups.get(k).list.push({ i, info });
   });
@@ -359,7 +512,12 @@ function render() {
     meta.textContent = parts.join(' · ') + (isOpen ? ' ▲' : ' ▼');
     h.append(name, meta);
     h.onclick = () => { openGroups.has(g.key) ? openGroups.delete(g.key) : openGroups.add(g.key); render(); };
-    li.appendChild(h);
+    const gl = document.createElement('div'); gl.className = 'gline';
+    const ge = document.createElement('button'); ge.className = 'x'; ge.textContent = '✎';
+    ge.setAttribute('aria-label', 'Rename or merge ' + g.name);
+    ge.onclick = () => groupEdit(g);
+    gl.append(h, ge);
+    li.appendChild(gl);
     if (isOpen) {
       const sub = document.createElement('ul'); sub.className = 'subs';
       g.list.forEach(x => sub.appendChild(rowEl(x.i, x.info.label, true)));
@@ -437,6 +595,19 @@ $('pasteBtn').onclick = async () => {
     say('');
   } catch (e) { say('Couldn’t read the clipboard. Long-press the title box and choose Paste.'); }
 };
+
+$('selBtn').onclick = () => setSelect(!selectMode);
+$('selCancel').onclick = () => setSelect(false);
+$('selGroup').onclick = () => {
+  if (!selected.size) { say('Tick some discs first.'); return; }
+  openDialog({ title: 'Group ' + selected.size + (selected.size === 1 ? ' disc' : ' discs'), targets: [...selected] });
+};
+$('dlgOk').onclick = dlgSave;
+$('dlgCancel').onclick = closeDlg;
+$('dlgNew').oninput = () => { if (!dlg) return; dlg.keep = false; if ($('dlgNew').value) dlg.choice = null; hint(''); drawChoices(); };
+$('dlgNew').onkeydown = e => { if (e.key === 'Enter') dlgSave(); };
+$('dlg').onclick = e => { if (e.target === $('dlg')) closeDlg(); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && dlg) closeDlg(); });
 
 render();
 </script>
