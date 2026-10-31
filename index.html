@@ -71,6 +71,12 @@ li.selrow input{width:22px;height:22px;flex:none}
 .dlgList button[aria-pressed=true]{background:#fff;border-color:var(--ink)}
 .dlgHint{min-height:22px;margin:8px 0;font-size:14px}
 .dlgHint button{margin:6px 8px 0 0}
+details.sync{margin:24px 0 8px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px}
+details.sync summary{cursor:pointer;font-weight:800}
+details.sync .f{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+details.sync .row{margin-top:4px}
+details.sync .row .primary{font-size:16px;padding:12px}
+#syncMsg{color:var(--muted);font-size:14px;margin-top:8px}
 .empty{color:var(--muted);text-align:center;padding:28px 8px}
 @media (prefers-reduced-motion:no-preference){#panel{animation:in .18s ease-out}@keyframes in{from{opacity:0;transform:translateY(6px)}}}
 </style>
@@ -105,6 +111,20 @@ li.selrow input{width:22px;height:22px;flex:none}
   </div>
   <div class="count" id="count"></div>
   <ul id="list"></ul>
+
+  <details class="sync" id="syncBox">
+    <summary id="syncSum">Shared list</summary>
+    <div class="f" id="syncOff">
+      <p style="margin:0;color:var(--muted);font-size:14px">Share one list between phones. Everyone types the same passcode.</p>
+      <input type="text" id="syncName" placeholder="Your name (shown on discs you add)" autocomplete="off" aria-label="Your name">
+      <input type="password" id="syncPass" placeholder="Family passcode" autocomplete="off" aria-label="Family passcode">
+      <button class="primary" id="syncConnect">Connect</button>
+    </div>
+    <div class="f" id="syncOn" hidden>
+      <div class="row"><button class="primary" id="syncNow">Sync now</button><button class="ghost" id="syncOffBtn">Disconnect</button></div>
+    </div>
+    <div id="syncMsg" role="status"></div>
+  </details>
 </main>
 
 <div id="selbar" hidden>
@@ -135,14 +155,24 @@ const $ = id => document.getElementById(id);
 function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
 let items = load('discs', []);
 let cache = load('titles', {});
+let sync = load('sync', null);   // { pass, name, last } when the shared list is on
+let dirty = load('dirty', {});   // disc id -> positive stamp (changed) or negative (removed), waiting to upload
+let seq = Date.now();
+const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+items.forEach(i => { if (!i.id) i.id = uid(); });
 let cur = null, scanner = null, busy = false, keepScanning = false;
 
-function persist() {
+function persistLocal() {
   try {
     localStorage.setItem('discs', JSON.stringify(items));
     localStorage.setItem('titles', JSON.stringify(cache));
+    localStorage.setItem('dirty', JSON.stringify(dirty));
+    if (sync) localStorage.setItem('sync', JSON.stringify(sync)); else localStorage.removeItem('sync');
   } catch (e) { say('Couldn’t save to this browser. Export a CSV to keep your list.'); }
 }
+function persist() { persistLocal(); syncSoon(); }
+function mark(i) { if (sync) dirty[i.id] = ++seq; }
+function markDel(i) { if (sync) dirty[i.id] = -(++seq); }
 function say(t) { $('msg').textContent = t || ''; }
 
 function guessFormat(t) {
@@ -213,7 +243,9 @@ $('saveBtn').onclick = () => {
   const title = $('pTitle').value.trim();
   if (!title) { say('Add a title first.'); return; }
   if (!cur.fmt) { say('Pick DVD, Blu-ray or 4K UHD.'); return; }
-  items.unshift({ code: cur.code, title, fmt: cur.fmt, added: new Date().toISOString().slice(0, 10) });
+  const rec = { id: uid(), code: cur.code, title, fmt: cur.fmt, added: new Date().toISOString().slice(0, 10) };
+  if (sync && sync.name) rec.by = sync.name;
+  items.unshift(rec); mark(rec);
   cache[cur.code] = { title, fmt: cur.fmt };
   persist(); closePanel(); say('Added: ' + title); render();
   if (keepScanning) startScan();
@@ -425,7 +457,7 @@ function dlgSave() {
   } else if (dlg.choice) {
     value = dlg.choice.t === 'alone' ? '' : dlg.stats.get(dlg.choice.k).name;
   } else { hint('Pick a group or type a new name.'); return; }
-  o.targets.forEach(i => { i.show = value; });
+  o.targets.forEach(i => { i.show = value; mark(i); });
   persist(); closeDlg();
   if (selectMode) setSelect(false); else render();
 }
@@ -447,14 +479,14 @@ function rowEl(i, text, nested) {
   li.className = i.fmt;
   const t = document.createElement('div'); t.className = 't';
   const b = document.createElement('b'); b.textContent = text;
-  const s = document.createElement('span'); s.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res;
+  const s = document.createElement('span'); s.textContent = FMT[i.fmt].name + ' · ' + FMT[i.fmt].res + (i.by ? ' · added by ' + i.by : '');
   t.append(b, s);
   const e = document.createElement('button'); e.className = 'x'; e.textContent = '✎';
   e.setAttribute('aria-label', 'Change the show name for ' + i.title);
   e.onclick = () => editShow(i);
   const x = document.createElement('button'); x.className = 'x'; x.textContent = '×';
   x.setAttribute('aria-label', 'Remove ' + i.title);
-  x.onclick = () => { if (confirm('Remove “' + i.title + '”?')) { items.splice(items.indexOf(i), 1); persist(); render(); } };
+  x.onclick = () => { if (confirm('Remove “' + i.title + '”?')) { items.splice(items.indexOf(i), 1); markDel(i); persist(); render(); } };
   li.append(t, e, x);
   return li;
 }
@@ -575,9 +607,9 @@ $('importFile').onchange = async e => {
     if (!title || !fmt) { skipped++; return; }
     if (items.some(i => i.code === code && i.title === title && i.fmt === fmt && i.added === date)) { skipped++; return; }
     const rawShow = iS >= 0 ? (r[iS] || '').trim() : '';
-    const item = { code, title, fmt, added: date };
+    const item = { id: uid(), code, title, fmt, added: date };
     if (rawShow === '-') item.show = ''; else if (rawShow) item.show = rawShow;
-    items.push(item);
+    items.push(item); mark(item);
     if (code) cache[code] = { title, fmt };
     added++;
   });
@@ -608,6 +640,99 @@ $('dlgNew').oninput = () => { if (!dlg) return; dlg.keep = false; if ($('dlgNew'
 $('dlgNew').onkeydown = e => { if (e.key === 'Enter') dlgSave(); };
 $('dlg').onclick = e => { if (e.target === $('dlg')) closeDlg(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && dlg) closeDlg(); });
+
+/* ---------- shared list ---------- */
+const API = LOOKUP_PROXY + '/discs';
+let syncing = false, syncTimer = null;
+const syncSay = t => { $('syncMsg').textContent = t || ''; };
+function drawSync() {
+  $('syncOff').hidden = !!sync;
+  $('syncOn').hidden = !sync;
+  $('syncSum').textContent = sync ? 'Shared list: on' + (sync.name ? ' (' + sync.name + ')' : '') : 'Shared list';
+}
+function syncSoon() { if (!sync) return; clearTimeout(syncTimer); syncTimer = setTimeout(() => doSync(), 1500); }
+async function api(query, opt) {
+  const r = await fetch(API + query, Object.assign({}, opt, { headers: { 'X-Passcode': sync.pass, 'Content-Type': 'application/json' } }));
+  if (r.status === 401) throw new Error('auth');
+  if (!r.ok) throw new Error('http ' + r.status);
+  return r.json();
+}
+const toRec = i => ({ id: i.id, code: i.code || '', title: i.title, fmt: i.fmt, added: i.added || '', grp: i.show === undefined ? null : i.show, added_by: i.by || null });
+function applyRemote(r) {
+  const at = items.findIndex(i => i.id === r.id);
+  if (r.deleted) { if (at >= 0) items.splice(at, 1); delete dirty[r.id]; return; }
+  if (dirty[r.id] > 0) return; // a newer change of ours is waiting to upload
+  const rec = { id: r.id, code: r.code || '', title: r.title, fmt: r.fmt, added: r.added || '' };
+  if (r.grp !== null && r.grp !== undefined) rec.show = r.grp;
+  if (r.added_by) rec.by = r.added_by;
+  if (at >= 0) items[at] = rec; else items.push(rec);
+  if (rec.code) cache[rec.code] = { title: rec.title, fmt: rec.fmt };
+}
+async function doSync() {
+  if (!sync || syncing) return;
+  syncing = true;
+  syncSay('Syncing…');
+  let more = false;
+  try {
+    const snap = Object.keys(dirty).slice(0, 300).map(id => [id, dirty[id]]);
+    if (snap.length) {
+      const batch = snap.map(([id, v]) => {
+        if (v < 0) return { id, deleted: 1 };
+        const it = items.find(i => i.id === id);
+        return it ? toRec(it) : null;
+      }).filter(Boolean);
+      if (batch.length) await api('', { method: 'POST', body: JSON.stringify(batch) });
+      snap.forEach(([id, v]) => { if (dirty[id] === v) delete dirty[id]; });
+      more = Object.keys(dirty).length > 0;
+    }
+    let guard = 0, got;
+    do {
+      const d = await api('?since=' + (sync.last || 0));
+      got = d.discs.length;
+      d.discs.forEach(applyRemote);
+      d.discs.forEach(r => { if (r.updated > (sync.last || 0)) sync.last = r.updated; });
+    } while (got >= 1000 && ++guard < 50);
+    items.sort((a, b) => (b.added || '').localeCompare(a.added || ''));
+    persistLocal(); render();
+    syncSay('Synced at ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '.');
+  } catch (e) {
+    persistLocal();
+    syncSay(e.message === 'auth' ? 'Wrong passcode. Disconnect and try again.' : 'Offline. Your changes are saved on this phone and will sync later.');
+    more = false;
+  } finally { syncing = false; }
+  if (more) setTimeout(doSync, 200);
+}
+async function connectShared() {
+  const pass = $('syncPass').value.trim(), name = $('syncName').value.trim();
+  if (!pass || !/^[\x20-\x7E]+$/.test(pass)) { syncSay('Type a passcode using normal letters, numbers or symbols.'); return; }
+  sync = { pass, name, last: 0 };
+  syncSay('Connecting…');
+  try {
+    const d = await api('?since=0');
+    const key = x => (x.code || '') + '|' + String(x.title).toLowerCase().trim() + '|' + x.fmt;
+    const serverIds = new Set(d.discs.map(r => r.id));
+    const serverKeys = new Set(d.discs.filter(r => !r.deleted).map(key));
+    items = items.filter(i => serverIds.has(i.id) || !serverKeys.has(key(i)));
+    items.forEach(i => { if (!serverIds.has(i.id)) { if (name && !i.by) i.by = name; dirty[i.id] = ++seq; } });
+    persistLocal(); drawSync();
+    await doSync();
+  } catch (e) {
+    sync = null; drawSync();
+    syncSay(e.message === 'auth' ? 'That passcode wasn’t accepted.' : 'Couldn’t reach the shared list. Check your connection.');
+  }
+}
+$('syncConnect').onclick = connectShared;
+$('syncPass').onkeydown = e => { if (e.key === 'Enter') connectShared(); };
+$('syncNow').onclick = () => doSync();
+$('syncOffBtn').onclick = () => {
+  if (!confirm('Disconnect from the shared list? The discs stay on this phone but stop syncing.')) return;
+  sync = null; dirty = {}; persistLocal(); drawSync(); syncSay('');
+};
+document.addEventListener('visibilitychange', () => { if (!document.hidden) doSync(); });
+setInterval(() => { if (!document.hidden) doSync(); }, 45000);
+drawSync();
+persistLocal();
+if (sync) doSync();
 
 render();
 </script>
